@@ -9,7 +9,7 @@ export class UsersController {
     // Register account
     @Post('/signup')
     async createUserAccount(@Body() createUserDTO : CreateUserDTO) {
-
+        return this.usersService.signup(createUserDTO);
     }
 
     @Put('/update-profile')

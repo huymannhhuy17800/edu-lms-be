@@ -3,21 +3,361 @@
 
 // Get a free hosted Postgres database in seconds: `npx create-db`
 
-generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
-  moduleFormat    = "cjs"
-}
-
 datasource db {
   provider = "postgresql"
 }
 
-model Users {
-  id String @unique @default(uuid())
-  firstname String?
-  lastname String?
-  email String @unique
-  password String 
-  createAt DateTime @default(now() )
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
+}
+
+// ------------------------------------------------------------
+// ENUMS
+// ------------------------------------------------------------
+
+enum UserRole {
+  ADMIN
+  TEACHER
+  STUDENT
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  COMPLETED
+  DROPPED
+}
+
+enum EnrollmentResult {
+  PENDING
+  PASS
+  FAIL
+}
+
+enum SessionStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+}
+
+enum AttendanceMethod {
+  MANUAL
+  QR
+}
+
+enum SubmissionStatus {
+  SUBMITTED
+  LATE
+  GRADED
+  MISSING
+}
+
+// ------------------------------------------------------------
+// USER
+// ------------------------------------------------------------
+
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  firstName    String
+  lastName     String
+  roles        UserRole[]
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  // Teacher-side relations
+  classesTeaching    ClassTeacher[]
+  sessionsCreated    ClassSession[]  @relation("SessionCreatedBy")
+  assignmentsCreated Assignment[]    @relation("AssignmentCreatedBy")
+  attendanceMarked   Attendance[]    @relation("AttendanceMarkedBy")
+  submissionsGraded  Submission[]    @relation("SubmissionGradedBy")
+  postsAuthored      DashboardPost[] @relation("PostAuthor")
+
+  // Student-side relations
+  enrollments Enrollment[]
+  attendance  Attendance[] @relation("AttendanceStudent")
+  submissions Submission[] @relation("SubmissionStudent")
+
+  // Shared relations
+  comments PostComment[] @relation("CommentAuthor")
+
+  // GIN index so role-filtered queries (e.g. list all teachers) don't scan the table
+  @@index([roles], type: Gin)
+  @@map("users")
+}
+
+// ------------------------------------------------------------
+// CLASS
+// ------------------------------------------------------------
+
+model Class {
+  id          String    @id @default(uuid())
+  code        String    @unique
+  name        String
+  description String?
+  startDate   DateTime?
+  endDate     DateTime?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  teachers    ClassTeacher[]
+  enrollments Enrollment[]
+  sessions    ClassSession[]
+  assignments Assignment[]
+  posts       DashboardPost[]
+
+  @@map("classes")
+}
+
+// Join table: supports multiple teachers per class (main + co-teachers)
+model ClassTeacher {
+  id        String   @id @default(uuid())
+  classId   String
+  teacherId String
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  class   Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacher User  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, teacherId])
+  @@index([teacherId])
+  @@map("class_teachers")
+}
+
+// ------------------------------------------------------------
+// ENROLLMENT (Student <-> Class)
+// ------------------------------------------------------------
+
+model Enrollment {
+  id         String           @id @default(uuid())
+  classId    String
+  studentId  String
+  status     EnrollmentStatus @default(ACTIVE)
+  result     EnrollmentResult @default(PENDING)
+  enrolledAt DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  class   Class @relation(fields: [classId], references: [id], onDelete: Cascade)
+  student User  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, studentId])
+  @@index([studentId])
+  @@map("enrollments")
+}
+
+// ------------------------------------------------------------
+// CLASS SESSION
+// ------------------------------------------------------------
+
+model ClassSession {
+  id          String        @id @default(uuid())
+  classId     String
+  topic       String?
+  date        DateTime
+  startTime   DateTime?
+  endTime     DateTime?
+  status      SessionStatus @default(SCHEDULED)
+  createdById String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  class       Class          @relation(fields: [classId], references: [id], onDelete: Cascade)
+  createdBy   User           @relation("SessionCreatedBy", fields: [createdById], references: [id])
+  attendance  Attendance[]
+  assignments Assignment[]
+  qrCode      SessionQrCode?
+
+  @@index([classId, date])
+  @@map("class_sessions")
+}
+
+// One active QR code per session for student self check-in.
+// The QR encodes a URL containing `token`; the session id is never
+// exposed in the QR so codes cannot be forged from known session ids.
+model SessionQrCode {
+  id        String   @id @default(uuid())
+  sessionId String   @unique
+  token     String   @unique @default(uuid())
+  expiresAt DateTime
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  session ClassSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("session_qr_codes")
+}
+
+// ------------------------------------------------------------
+// ATTENDANCE
+// ------------------------------------------------------------
+
+model Attendance {
+  id         String           @id @default(uuid())
+  sessionId  String
+  studentId  String
+  status     AttendanceStatus
+  method     AttendanceMethod @default(MANUAL)
+  note       String?
+  markedById String?
+  markedAt   DateTime?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  session  ClassSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  student  User         @relation("AttendanceStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  markedBy User?        @relation("AttendanceMarkedBy", fields: [markedById], references: [id])
+
+  @@unique([sessionId, studentId])
+  @@index([studentId])
+  @@map("attendance")
+}
+
+// ------------------------------------------------------------
+// ASSIGNMENT
+// ------------------------------------------------------------
+
+model Assignment {
+  id          String    @id @default(uuid())
+  classId     String
+  sessionId   String? // optional: tie assignment to the session it was given in
+  title       String
+  description String?
+  dueDate     DateTime?
+  maxScore    Float     @default(100)
+  createdById String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  class       Class                  @relation(fields: [classId], references: [id], onDelete: Cascade)
+  session     ClassSession?          @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  createdBy   User                   @relation("AssignmentCreatedBy", fields: [createdById], references: [id])
+  attachments AssignmentAttachment[]
+  submissions Submission[]
+
+  @@index([classId, dueDate])
+  @@index([sessionId])
+  @@map("assignments")
+}
+
+model AssignmentAttachment {
+  id           String   @id @default(uuid())
+  assignmentId String
+  fileUrl      String
+  fileName     String
+  createdAt    DateTime @default(now())
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+
+  @@index([assignmentId])
+  @@map("assignment_attachments")
+}
+
+// ------------------------------------------------------------
+// SUBMISSION
+// ------------------------------------------------------------
+
+model Submission {
+  id           String           @id @default(uuid())
+  assignmentId String
+  studentId    String
+  content      String?
+  status       SubmissionStatus @default(SUBMITTED)
+  score        Float?
+  feedback     String?
+  submittedAt  DateTime         @default(now())
+  gradedById   String?
+  gradedAt     DateTime?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  assignment Assignment             @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  student    User                   @relation("SubmissionStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  gradedBy   User?                  @relation("SubmissionGradedBy", fields: [gradedById], references: [id])
+  files      SubmissionAttachment[]
+
+  @@unique([assignmentId, studentId])
+  @@index([studentId])
+  @@map("submissions")
+}
+
+model SubmissionAttachment {
+  id           String   @id @default(uuid())
+  submissionId String
+  fileUrl      String
+  fileName     String
+  createdAt    DateTime @default(now())
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@map("submission_attachments")
+}
+
+// ------------------------------------------------------------
+// CLASS DASHBOARD (announcements / posts)
+// ------------------------------------------------------------
+
+model DashboardPost {
+  id        String   @id @default(uuid())
+  classId   String
+  authorId  String
+  title     String
+  content   String
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  class       Class            @relation(fields: [classId], references: [id], onDelete: Cascade)
+  author      User             @relation("PostAuthor", fields: [authorId], references: [id])
+  attachments PostAttachment[]
+  comments    PostComment[]
+
+  @@index([classId, pinned, createdAt(sort: Desc)])
+  @@map("dashboard_posts")
+}
+
+model PostAttachment {
+  id        String   @id @default(uuid())
+  postId    String
+  fileUrl   String
+  fileName  String
+  createdAt DateTime @default(now())
+
+  post DashboardPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId])
+  @@map("post_attachments")
+}
+
+model PostComment {
+  id        String   @id @default(uuid())
+  postId    String
+  authorId  String
+  content   String
+  createdAt DateTime @default(now())
+
+  post   DashboardPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author User          @relation("CommentAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+  @@map("post_comments")
 }
